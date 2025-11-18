@@ -1,9 +1,15 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, EmailStr, Field
+from typing import Optional
 
-app = FastAPI()
+# Database helpers (pymongo under the hood)
+from database import create_document, db
 
+app = FastAPI(title="Neurodek API")
+
+# CORS: open for development/preview
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -12,57 +18,76 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+class ContactRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    email: EmailStr
+    company: Optional[str] = None
+    budget: Optional[str] = None
+    message: str = Field(..., min_length=5, max_length=5000)
+
+
+@app.get("/")
+def root():
+    return {"message": "Neurodek API is running"}
+
 
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
+    """Diagnostic endpoint to verify backend and database connectivity"""
     response = {
         "backend": "✅ Running",
         "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
+        "database_url": "❌ Not Set",
+        "database_name": "❌ Not Set",
         "connection_status": "Not Connected",
-        "collections": []
+        "collections": [],
     }
-    
+
     try:
-        # Try to import database module
-        from database import db
-        
+        # Env check
+        database_url = os.getenv("DATABASE_URL")
+        database_name = os.getenv("DATABASE_NAME")
+        response["database_url"] = "✅ Set" if database_url else "❌ Not Set"
+        response["database_name"] = "✅ Set" if database_name else "❌ Not Set"
+
         if db is not None:
             response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
             response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
             try:
                 collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
+                response["collections"] = collections[:10]
                 response["database"] = "✅ Connected & Working"
             except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
+                response["database"] = f"⚠️ Connected but error: {str(e)[:120]}"
         else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+            response["database"] = "⚠️ Available but not initialized"
+
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
+        response["database"] = f"❌ Error: {str(e)[:120]}"
+
     return response
+
+
+@app.post("/contact")
+def contact(payload: ContactRequest):
+    """Accepts contact submissions and stores them in MongoDB."""
+    try:
+        # Persist to DB if available
+        doc_id = None
+        if db is None:
+            # In environments without DB, skip persistence but still respond success
+            doc_id = None
+        else:
+            doc_id = create_document("contact", payload)
+
+        return {
+            "status": "ok",
+            "name": payload.name,
+            "id": doc_id,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to submit: {str(e)[:200]}")
 
 
 if __name__ == "__main__":
